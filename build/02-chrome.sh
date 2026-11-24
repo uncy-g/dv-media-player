@@ -4,25 +4,33 @@
 # i-fi.tv - Google Chrome Installation
 # Target: Debian 13 (Trixie)
 #
-# Installs Google Chrome Stable and creates a
-# Leonardo-specific desktop launcher.
+# Installs Google Chrome Stable.
+# Creates Leonardo-specific launchers.
 #
-# The Leonardo launcher uses --password-store=basic
-# to avoid GNOME Keyring prompts with automatic login.
+# Chrome uses --password-store=basic to avoid
+# GNOME Keyring prompts with automatic login.
 #
-# Does not modify system-wide Chrome launchers.
+# System-wide Chrome desktop launchers are NOT modified.
 #
 
 set -euo pipefail
 
+# --------------------------------------------------
+# Configuration
+# --------------------------------------------------
+
+LEONARDO_USER="leonardo"
+CHROME_REPO_KEY="/usr/share/keyrings/google-chrome.gpg"
+CHROME_REPO_FILE="/etc/apt/sources.list.d/google-chrome.list"
+
 echo
 echo "=========================================="
-echo " i-fi.tv - Google Chrome Installation"
+echo " i-fi.tv - Chrome Installation"
 echo "=========================================="
 echo
 
 # --------------------------------------------------
-# 1. Check privileges
+# 1. Privilege and architecture checks
 # --------------------------------------------------
 
 if [[ $EUID -ne 0 ]]; then
@@ -30,61 +38,12 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# --------------------------------------------------
-# 2. Install prerequisites
-# --------------------------------------------------
+ARCH=$(dpkg --print-architecture)
 
-echo "[1/5] Installing prerequisites..."
-
-apt-get update
-
-apt-get install -y \
-    wget \
-    ca-certificates \
-    gnupg
-
-# --------------------------------------------------
-# 3. Configure Google Chrome repository
-# --------------------------------------------------
-
-echo "[2/5] Configuring Google Chrome repository..."
-
-wget -q -O /tmp/google-chrome.gpg \
-    https://dl.google.com/linux/linux_signing_key.pub
-
-gpg --dearmor \
-    --yes \
-    -o /usr/share/keyrings/google-chrome.gpg \
-    /tmp/google-chrome.gpg
-
-rm -f /tmp/google-chrome.gpg
-
-cat > /etc/apt/sources.list.d/google-chrome.list <<'EOF'
-deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main
-EOF
-
-# --------------------------------------------------
-# 4. Install Google Chrome
-# --------------------------------------------------
-
-echo "[3/5] Installing Google Chrome..."
-
-apt-get update
-
-apt-get install -y google-chrome-stable
-
-echo
-echo "Installed Chrome version:"
-google-chrome-stable --version
-
-# --------------------------------------------------
-# 5. Create Leonardo-specific desktop launcher
-# --------------------------------------------------
-
-echo
-echo "[4/5] Creating Leonardo Chrome launcher..."
-
-LEONARDO_USER="leonardo"
+if [[ "$ARCH" != "amd64" ]]; then
+    echo "ERROR: Google Chrome requires amd64."
+    exit 1
+fi
 
 LEONARDO_HOME=$(getent passwd "$LEONARDO_USER" | cut -d: -f6)
 
@@ -93,9 +52,76 @@ if [[ -z "$LEONARDO_HOME" || ! -d "$LEONARDO_HOME" ]]; then
     exit 1
 fi
 
+LEONARDO_GROUP=$(id -gn "$LEONARDO_USER")
+
+echo "Target user: $LEONARDO_USER"
+echo "Home:        $LEONARDO_HOME"
+echo "Group:       $LEONARDO_GROUP"
+
+# --------------------------------------------------
+# 2. Install prerequisites
+# --------------------------------------------------
+
+echo
+echo "[1/5] Installing prerequisites..."
+
+apt-get update
+
+apt-get install -y \
+    wget \
+    ca-certificates \
+    gnupg \
+    xdg-utils
+
+# --------------------------------------------------
+# 3. Configure Google Chrome repository
+# --------------------------------------------------
+
+echo
+echo "[2/5] Configuring Google Chrome repository..."
+
+wget -q -O /tmp/google-chrome.gpg \
+    https://dl.google.com/linux/linux_signing_key.pub
+
+gpg --dearmor \
+    --yes \
+    -o "$CHROME_REPO_KEY" \
+    /tmp/google-chrome.gpg
+
+rm -f /tmp/google-chrome.gpg
+
+cat > "$CHROME_REPO_FILE" <<'EOF'
+deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main
+EOF
+
+# --------------------------------------------------
+# 4. Install Google Chrome
+# --------------------------------------------------
+
+echo
+echo "[3/5] Installing Google Chrome..."
+
+apt-get update
+
+apt-get install -y google-chrome-stable
+
+echo
+echo "Installed version:"
+google-chrome-stable --version
+
+# --------------------------------------------------
+# 5. Create Leonardo application launcher
+# --------------------------------------------------
+
+echo
+echo "[4/5] Creating Leonardo application launcher..."
+
 APP_DIR="${LEONARDO_HOME}/.local/share/applications"
 
-mkdir -p "$APP_DIR"
+install -d \
+    -o "$LEONARDO_USER" \
+    -g "$LEONARDO_GROUP" \
+    "$APP_DIR"
 
 cat > "${APP_DIR}/google-chrome.desktop" <<'EOF'
 [Desktop Entry]
@@ -111,39 +137,76 @@ Categories=Network;WebBrowser;
 StartupNotify=true
 EOF
 
-# Set ownership to Leonardo
-chown -R "${LEONARDO_USER}:$(id -gn "$LEONARDO_USER")" \
-    "$APP_DIR"
+chown "$LEONARDO_USER:$LEONARDO_GROUP" \
+    "${APP_DIR}/google-chrome.desktop"
 
 chmod 755 "${APP_DIR}/google-chrome.desktop"
 
 # --------------------------------------------------
-# 6. Refresh desktop application database
+# 6. Create Leonardo desktop shortcut
 # --------------------------------------------------
 
-echo "[5/5] Refreshing Leonardo desktop applications..."
+echo
+echo "[5/5] Creating Leonardo desktop shortcut..."
 
+# Obtain the configured desktop directory.
+DESKTOP_DIR=$(runuser -u "$LEONARDO_USER" -- \
+    env HOME="$LEONARDO_HOME" xdg-user-dir DESKTOP 2>/dev/null || true)
+
+# Fall back to the conventional Desktop directory.
+if [[ -z "$DESKTOP_DIR" ]]; then
+    DESKTOP_DIR="${LEONARDO_HOME}/Desktop"
+fi
+
+# Create desktop directory if necessary.
+install -d \
+    -o "$LEONARDO_USER" \
+    -g "$LEONARDO_GROUP" \
+    "$DESKTOP_DIR"
+
+# Install the desktop shortcut.
+cp "${APP_DIR}/google-chrome.desktop" \
+   "${DESKTOP_DIR}/Google Chrome.desktop"
+
+chown "$LEONARDO_USER:$LEONARDO_GROUP" \
+    "${DESKTOP_DIR}/Google Chrome.desktop"
+
+chmod 755 "${DESKTOP_DIR}/Google Chrome.desktop"
+
+# Mark shortcut as trusted (XFCE/GIO).
+if command -v gio >/dev/null 2>&1; then
+    runuser -u "$LEONARDO_USER" -- \
+        env HOME="$LEONARDO_HOME" \
+        gio set "${DESKTOP_DIR}/Google Chrome.desktop" \
+        metadata::trusted true 2>/dev/null || true
+fi
+
+# Refresh Leonardo's application menu database.
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$APP_DIR" || true
 fi
 
 # --------------------------------------------------
-# Complete
+# 7. Completion
 # --------------------------------------------------
 
 echo
 echo "=========================================="
-echo " Google Chrome installation complete"
+echo " Chrome installation complete"
 echo "=========================================="
 echo
 echo "Chrome version:"
 google-chrome-stable --version
 echo
-echo "Leonardo launcher:"
+echo "Leonardo application launcher:"
 echo "${APP_DIR}/google-chrome.desktop"
 echo
-echo "Chrome launch options:"
+echo "Leonardo desktop shortcut:"
+echo "${DESKTOP_DIR}/Google Chrome.desktop"
+echo
+echo "Chrome launch parameter:"
 echo "--password-store=basic"
 echo
-echo "System-wide Chrome launcher: UNMODIFIED"
+echo "System-wide desktop launchers: UNMODIFIED"
 echo
+echo "=========================================="
