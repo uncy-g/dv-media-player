@@ -230,6 +230,8 @@ systemctl enable lightdm
 
 systemctl set-default graphical.target
 
+
+
 # --------------------------------------------------
 # Completion
 # --------------------------------------------------
@@ -262,7 +264,6 @@ echo "  Retained"
 echo
 echo "Applications:"
 echo "  Firefox ESR"
-echo "  Kodi"
 echo
 echo "Services:"
 echo "  SSH enabled"
