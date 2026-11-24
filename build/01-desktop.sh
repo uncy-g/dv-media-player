@@ -1,15 +1,25 @@
 
 #!/bin/bash
 #
-# i-fi.tv - Desktop and core media applications
-#
+# i-fi.tv - Desktop Environment Installation
 # Target: Debian 13 (Trixie)
-# Desktop: XFCE
-# Display manager: LightDM
-# User: leonardo
 #
-# This script must be executable over SSH.
-# No active graphical session is required.
+# Responsibilities:
+#   - Install Xorg and XFCE desktop
+#   - Configure LightDM
+#   - Configure Leonardo automatic login
+#   - Configure XFCE screensaver
+#   - Disable screen locking and password challenges
+#   - Retain screen blanking and display power management
+#   - Install Firefox ESR
+#   - Install Kodi
+#   - Install SSH server
+#   - Install HDMI-CEC utilities
+#
+# Does NOT:
+#   - Install Google Chrome
+#   - Configure Chrome launchers
+#   - Configure Unified Remote
 #
 
 set -euo pipefail
@@ -18,48 +28,63 @@ set -euo pipefail
 # Configuration
 # --------------------------------------------------
 
-PLAYER_USER="leonardo"
-PLAYER_HOME="/home/${PLAYER_USER}"
+LEONARDO_USER="leonardo"
 
-XFCE_CONFIG="${PLAYER_HOME}/.config/xfce4"
-AUTOSTART="${PLAYER_HOME}/.config/autostart"
-
-echo "======================================"
-echo " i-fi.tv Desktop Installation"
-echo "======================================"
+echo
+echo "=========================================="
+echo " i-fi.tv - Desktop Installation"
+echo "=========================================="
+echo
 
 # --------------------------------------------------
-# Validate operating system
+# 1. Privilege and platform checks
 # --------------------------------------------------
 
-source /etc/os-release
-
-if [[ "$ID" != "debian" || "$VERSION_CODENAME" != "trixie" ]]; then
-    echo "ERROR: Debian 13 Trixie required."
+if [[ $EUID -ne 0 ]]; then
+    echo "ERROR: Run this script as root."
     exit 1
 fi
 
-# --------------------------------------------------
-# Validate user
-# --------------------------------------------------
-
-if ! id "$PLAYER_USER" >/dev/null 2>&1; then
-    echo "ERROR: User ${PLAYER_USER} does not exist."
+if [[ ! -f /etc/debian_version ]]; then
+    echo "ERROR: Debian installation required."
     exit 1
 fi
 
+if ! grep -q '^VERSION_CODENAME=trixie' /etc/os-release; then
+    echo "ERROR: This script targets Debian 13 Trixie."
+    exit 1
+fi
+
+if ! id "$LEONARDO_USER" >/dev/null 2>&1; then
+    echo "ERROR: User $LEONARDO_USER does not exist."
+    exit 1
+fi
+
+LEONARDO_HOME=$(getent passwd "$LEONARDO_USER" | cut -d: -f6)
+LEONARDO_GROUP=$(id -gn "$LEONARDO_USER")
+
+if [[ -z "$LEONARDO_HOME" || ! -d "$LEONARDO_HOME" ]]; then
+    echo "ERROR: Leonardo home directory not found."
+    exit 1
+fi
+
+echo "Target user: $LEONARDO_USER"
+echo "Home:        $LEONARDO_HOME"
+
 # --------------------------------------------------
-# Install desktop and media components
+# 2. Install desktop packages
 # --------------------------------------------------
 
-echo "Installing desktop components..."
+echo
+echo "[1/6] Installing desktop packages..."
 
 apt-get update
 
-DEBIAN_FRONTEND=noninteractive apt-get install -y \
+apt-get install -y \
     xorg \
     x11-xserver-utils \
     xfce4 \
+    xfce4-goodies \
     xfce4-screenshooter \
     xfce4-power-manager \
     xfce4-screensaver \
@@ -70,78 +95,135 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
     cec-utils
 
 # --------------------------------------------------
-# Configure automatic login
+# 3. Remove competing screen locker
 # --------------------------------------------------
 
-echo "Configuring LightDM..."
+echo
+echo "[2/6] Removing light-locker..."
 
-mkdir -p /etc/lightdm/lightdm.conf.d
+if dpkg -s light-locker >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive \
+        apt-get purge -y light-locker
+else
+    echo "light-locker not installed."
+fi
 
-cat > /etc/lightdm/lightdm.conf.d/50-dv-media-player.conf <<EOF
+# --------------------------------------------------
+# 4. Configure LightDM automatic login
+# --------------------------------------------------
+
+echo
+echo "[3/6] Configuring LightDM..."
+
+install -d /etc/lightdm/lightdm.conf.d
+
+cat > /etc/lightdm/lightdm.conf.d/50-leonardo.conf <<EOF
 [Seat:*]
-autologin-user=${PLAYER_USER}
+autologin-user=${LEONARDO_USER}
 autologin-user-timeout=0
-autologin-session=xfce
+user-session=xfce
 EOF
 
 # --------------------------------------------------
-# Configure XFCE appliance behaviour
+# 5. Configure Leonardo XFCE settings
 # --------------------------------------------------
 
-echo "Configuring XFCE..."
+echo
+echo "[4/6] Configuring XFCE..."
 
-mkdir -p \
-    "${XFCE_CONFIG}/xfconf/xfce-perchannel-xml" \
-    "${AUTOSTART}"
+XFCE_CONFIG="${LEONARDO_HOME}/.config/xfce4"
 
-# Disable screensaver and locking
+SCREENSAVER_CONFIG="${XFCE_CONFIG}/xfconf/xfce-perchannel-xml/xfce4-screensaver.xml"
 
-cat > "${XFCE_CONFIG}/xfconf/xfce-perchannel-xml/xfce4-screensaver.xml" <<'EOF'
+POWER_CONFIG="${XFCE_CONFIG}/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml"
+
+install -d \
+    -o "$LEONARDO_USER" \
+    -g "$LEONARDO_GROUP" \
+    "$(dirname "$SCREENSAVER_CONFIG")"
+
+# --------------------------------------------------
+# XFCE Screensaver
+# --------------------------------------------------
+#
+# Keep screensaver functionality.
+# Disable screen locking and password challenges.
+#
+# /lock/enabled = false
+#
+
+cat > "$SCREENSAVER_CONFIG" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-screensaver" version="1.0">
-    <property name="saver" type="empty">
-        <property name="enabled" type="bool" value="false"/>
-    </property>
-    <property name="lock" type="empty">
-        <property name="enabled" type="bool" value="false"/>
-    </property>
+  <property name="lock" type="empty">
+    <property name="enabled" type="bool" value="false"/>
+  </property>
 </channel>
 EOF
 
-# Disable power-manager blanking and locking
+# --------------------------------------------------
+# XFCE Power Manager
+# --------------------------------------------------
+#
+# Retain display power management.
+# Do not lock the screen when the display wakes.
+#
+# /xfce4-power-manager/lock-screen = false
+#
 
-cat > "${XFCE_CONFIG}/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml" <<'EOF'
+cat > "$POWER_CONFIG" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xfce4-power-manager" version="1.0">
+  <property name="xfce4-power-manager" type="empty">
     <property name="lock-screen" type="bool" value="false"/>
-    <property name="blank-on-ac" type="int" value="0"/>
-    <property name="dpms-enabled" type="bool" value="false"/>
+  </property>
 </channel>
 EOF
 
-# Disable X11 screen blanking and DPMS at session startup
+chown -R \
+    "$LEONARDO_USER:$LEONARDO_GROUP" \
+    "$XFCE_CONFIG"
 
-cat > "${AUTOSTART}/dv-display-settings.desktop" <<'EOF'
+# --------------------------------------------------
+# 6. Configure display startup and services
+# --------------------------------------------------
+
+echo
+echo "[5/6] Configuring desktop startup..."
+
+AUTOSTART_DIR="${LEONARDO_HOME}/.config/autostart"
+
+install -d \
+    -o "$LEONARDO_USER" \
+    -g "$LEONARDO_GROUP" \
+    "$AUTOSTART_DIR"
+
+# Display configuration.
+# Leave screen blanking and DPMS under XFCE power manager control.
+
+cat > "${AUTOSTART_DIR}/dv-display-settings.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
 Name=DV Display Settings
-Comment=Disable display blanking for media player
-Exec=xset s off -dpms s noblank
+Comment=Display configuration
+Exec=xset s on
 Terminal=false
+Hidden=false
+X-GNOME-Autostart-enabled=true
 EOF
 
+chown "$LEONARDO_USER:$LEONARDO_GROUP" \
+    "${AUTOSTART_DIR}/dv-display-settings.desktop"
+
+chmod 644 \
+    "${AUTOSTART_DIR}/dv-display-settings.desktop"
+
 # --------------------------------------------------
-# Set ownership
+# Enable required services
 # --------------------------------------------------
 
-chown -R "${PLAYER_USER}:${PLAYER_USER}" \
-    "${PLAYER_HOME}/.config"
-
-# --------------------------------------------------
-# Enable system services
-# --------------------------------------------------
-
-echo "Enabling system services..."
+echo
+echo "[6/6] Enabling services..."
 
 systemctl enable ssh
 systemctl enable lightdm
@@ -149,22 +231,46 @@ systemctl enable lightdm
 systemctl set-default graphical.target
 
 # --------------------------------------------------
-# Complete
+# Completion
 # --------------------------------------------------
 
 echo
-echo "======================================"
+echo "=========================================="
 echo " Desktop installation complete"
-echo "======================================"
+echo "=========================================="
 echo
-echo "Operating system : Debian Trixie"
-echo "Desktop          : XFCE"
-echo "Display manager  : LightDM"
-echo "Automatic login  : ${PLAYER_USER}"
-echo "Screensaver      : Disabled"
-echo "Screen locking   : Disabled"
-echo "Display blanking : Disabled"
-echo "SSH              : Enabled"
+echo "Desktop:"
+echo "  XFCE4"
 echo
-echo "Reboot required to apply all settings."
+echo "Display manager:"
+echo "  LightDM"
 echo
+echo "Automatic login:"
+echo "  $LEONARDO_USER"
+echo
+echo "Screensaver:"
+echo "  Installed"
+echo
+echo "Screen locking:"
+echo "  Disabled"
+echo
+echo "light-locker:"
+echo "  Removed"
+echo
+echo "Display power management:"
+echo "  Retained"
+echo
+echo "Applications:"
+echo "  Firefox ESR"
+echo "  Kodi"
+echo
+echo "Services:"
+echo "  SSH enabled"
+echo "  LightDM enabled"
+echo
+echo "HDMI-CEC:"
+echo "  cec-utils installed"
+echo
+echo "=========================================="
+echo " Reboot recommended"
+echo "=========================================="
