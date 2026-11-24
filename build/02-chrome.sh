@@ -2,15 +2,20 @@
 #!/bin/bash
 #
 # i-fi.tv - Google Chrome Installation
-# Target: Debian 13 (Trixie)
+# Target: Debian 13 (Trixie), amd64
 #
-# Installs Google Chrome Stable.
-# Creates Leonardo-specific launchers.
+# Responsibilities:
+#   - Install Google Chrome Stable
+#   - Configure Google's APT repository
+#   - Create Leonardo-specific Chrome launcher
+#   - Create Leonardo desktop shortcut
+#   - Configure Chrome password store
+#   - Establish XFCE trusted launcher metadata
 #
-# Chrome uses --password-store=basic to avoid
-# GNOME Keyring prompts with automatic login.
-#
-# System-wide Chrome desktop launchers are NOT modified.
+# Does NOT:
+#   - Modify system-wide desktop launchers
+#   - Configure screensaver or screen locking
+#   - Configure desktop power management
 #
 
 set -euo pipefail
@@ -20,6 +25,7 @@ set -euo pipefail
 # --------------------------------------------------
 
 LEONARDO_USER="leonardo"
+
 CHROME_REPO_KEY="/usr/share/keyrings/google-chrome.gpg"
 CHROME_REPO_FILE="/etc/apt/sources.list.d/google-chrome.list"
 
@@ -45,25 +51,53 @@ if [[ "$ARCH" != "amd64" ]]; then
     exit 1
 fi
 
-LEONARDO_HOME=$(getent passwd "$LEONARDO_USER" | cut -d: -f6)
-
-if [[ -z "$LEONARDO_HOME" || ! -d "$LEONARDO_HOME" ]]; then
-    echo "ERROR: Leonardo user or home directory not found."
+if ! id "$LEONARDO_USER" >/dev/null 2>&1; then
+    echo "ERROR: User $LEONARDO_USER does not exist."
     exit 1
 fi
 
+LEONARDO_UID=$(id -u "$LEONARDO_USER")
 LEONARDO_GROUP=$(id -gn "$LEONARDO_USER")
+LEONARDO_HOME=$(getent passwd "$LEONARDO_USER" | cut -d: -f6)
+
+if [[ -z "$LEONARDO_HOME" || ! -d "$LEONARDO_HOME" ]]; then
+    echo "ERROR: Leonardo home directory not found."
+    exit 1
+fi
+
+SESSION_RUNTIME="/run/user/${LEONARDO_UID}"
+SESSION_BUS="${SESSION_RUNTIME}/bus"
 
 echo "Target user: $LEONARDO_USER"
 echo "Home:        $LEONARDO_HOME"
-echo "Group:       $LEONARDO_GROUP"
 
 # --------------------------------------------------
-# 2. Install prerequisites
+# 2. Leonardo session helper
+# --------------------------------------------------
+
+SESSION_AVAILABLE=false
+
+if [[ -S "$SESSION_BUS" ]]; then
+    SESSION_AVAILABLE=true
+fi
+
+run_as_leonardo() {
+    runuser -u "$LEONARDO_USER" -- \
+        env \
+        HOME="$LEONARDO_HOME" \
+        USER="$LEONARDO_USER" \
+        LOGNAME="$LEONARDO_USER" \
+        XDG_RUNTIME_DIR="$SESSION_RUNTIME" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=${SESSION_BUS}" \
+        "$@"
+}
+
+# --------------------------------------------------
+# 3. Install prerequisites
 # --------------------------------------------------
 
 echo
-echo "[1/5] Installing prerequisites..."
+echo "[1/6] Installing prerequisites..."
 
 apt-get update
 
@@ -71,14 +105,15 @@ apt-get install -y \
     wget \
     ca-certificates \
     gnupg \
-    xdg-utils
+    xdg-utils \
+    libglib2.0-bin
 
 # --------------------------------------------------
-# 3. Configure Google Chrome repository
+# 4. Configure Google Chrome repository
 # --------------------------------------------------
 
 echo
-echo "[2/5] Configuring Google Chrome repository..."
+echo "[2/6] Configuring Google Chrome repository..."
 
 wget -q -O /tmp/google-chrome.gpg \
     https://dl.google.com/linux/linux_signing_key.pub
@@ -95,26 +130,25 @@ deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.goog
 EOF
 
 # --------------------------------------------------
-# 4. Install Google Chrome
+# 5. Install Google Chrome
 # --------------------------------------------------
 
 echo
-echo "[3/5] Installing Google Chrome..."
+echo "[3/6] Installing Google Chrome..."
 
 apt-get update
 
 apt-get install -y google-chrome-stable
 
 echo
-echo "Installed version:"
 google-chrome-stable --version
 
 # --------------------------------------------------
-# 5. Create Leonardo application launcher
+# 6. Create Leonardo application launcher
 # --------------------------------------------------
 
 echo
-echo "[4/5] Creating Leonardo application launcher..."
+echo "[4/6] Creating Leonardo application launcher..."
 
 APP_DIR="${LEONARDO_HOME}/.local/share/applications"
 
@@ -123,7 +157,9 @@ install -d \
     -g "$LEONARDO_GROUP" \
     "$APP_DIR"
 
-cat > "${APP_DIR}/google-chrome.desktop" <<'EOF'
+APP_LAUNCHER="${APP_DIR}/google-chrome.desktop"
+
+cat > "$APP_LAUNCHER" <<'EOF'
 [Desktop Entry]
 Version=1.0
 Type=Application
@@ -131,63 +167,87 @@ Name=Google Chrome
 GenericName=Web Browser
 Comment=Browse the Internet
 Exec=/usr/bin/google-chrome-stable --password-store=basic %U
+TryExec=/usr/bin/google-chrome-stable
 Icon=google-chrome
 Terminal=false
 Categories=Network;WebBrowser;
 StartupNotify=true
 EOF
 
-chown "$LEONARDO_USER:$LEONARDO_GROUP" \
-    "${APP_DIR}/google-chrome.desktop"
-
-chmod 755 "${APP_DIR}/google-chrome.desktop"
+chown "$LEONARDO_USER:$LEONARDO_GROUP" "$APP_LAUNCHER"
+chmod 644 "$APP_LAUNCHER"
 
 # --------------------------------------------------
-# 6. Create Leonardo desktop shortcut
+# 7. Create Leonardo desktop shortcut
 # --------------------------------------------------
 
 echo
-echo "[5/5] Creating Leonardo desktop shortcut..."
+echo "[5/6] Creating Leonardo desktop shortcut..."
 
-# Obtain the configured desktop directory.
-DESKTOP_DIR=$(runuser -u "$LEONARDO_USER" -- \
-    env HOME="$LEONARDO_HOME" xdg-user-dir DESKTOP 2>/dev/null || true)
+DESKTOP_DIR="${LEONARDO_HOME}/Desktop"
 
-# Fall back to the conventional Desktop directory.
-if [[ -z "$DESKTOP_DIR" ]]; then
-    DESKTOP_DIR="${LEONARDO_HOME}/Desktop"
+# Honour the configured XDG desktop directory.
+if [[ "$SESSION_AVAILABLE" == true ]]; then
+    CONFIGURED_DESKTOP=$(run_as_leonardo \
+        xdg-user-dir DESKTOP 2>/dev/null || true)
+
+    if [[ -n "$CONFIGURED_DESKTOP" && \
+          "$CONFIGURED_DESKTOP" != "$LEONARDO_HOME" ]]; then
+        DESKTOP_DIR="$CONFIGURED_DESKTOP"
+    fi
 fi
 
-# Create desktop directory if necessary.
 install -d \
     -o "$LEONARDO_USER" \
     -g "$LEONARDO_GROUP" \
     "$DESKTOP_DIR"
 
-# Install the desktop shortcut.
-cp "${APP_DIR}/google-chrome.desktop" \
-   "${DESKTOP_DIR}/Google Chrome.desktop"
+CHROME_SHORTCUT="${DESKTOP_DIR}/Google Chrome.desktop"
 
-chown "$LEONARDO_USER:$LEONARDO_GROUP" \
-    "${DESKTOP_DIR}/Google Chrome.desktop"
+cp "$APP_LAUNCHER" "$CHROME_SHORTCUT"
 
-chmod 755 "${DESKTOP_DIR}/Google Chrome.desktop"
+chown "$LEONARDO_USER:$LEONARDO_GROUP" "$CHROME_SHORTCUT"
+chmod 755 "$CHROME_SHORTCUT"
 
-# Mark shortcut as trusted (XFCE/GIO).
-if command -v gio >/dev/null 2>&1; then
-    runuser -u "$LEONARDO_USER" -- \
-        env HOME="$LEONARDO_HOME" \
-        gio set "${DESKTOP_DIR}/Google Chrome.desktop" \
-        metadata::trusted true 2>/dev/null || true
+# --------------------------------------------------
+# 8. Establish XFCE launcher trust
+# --------------------------------------------------
+
+echo
+echo "[6/6] Configuring XFCE launcher trust..."
+
+if [[ "$SESSION_AVAILABLE" == true ]]; then
+
+    # Mark the desktop launcher as trusted.
+    run_as_leonardo gio set -t string \
+        "$CHROME_SHORTCUT" \
+        metadata::trusted true
+
+    # XFCE requires the checksum of the final launcher.
+    CHECKSUM=$(sha256sum "$CHROME_SHORTCUT" | awk '{print $1}')
+
+    run_as_leonardo gio set -t string \
+        "$CHROME_SHORTCUT" \
+        metadata::xfce-exe-checksum "$CHECKSUM"
+
+    echo "XFCE trust metadata configured."
+    echo "Checksum: $CHECKSUM"
+
+else
+    echo "WARNING: Leonardo desktop session unavailable."
+    echo "Launcher trust metadata not configured."
 fi
 
-# Refresh Leonardo's application menu database.
+# --------------------------------------------------
+# 9. Refresh application menu database
+# --------------------------------------------------
+
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$APP_DIR" || true
 fi
 
 # --------------------------------------------------
-# 7. Completion
+# 10. Completion
 # --------------------------------------------------
 
 echo
@@ -198,15 +258,19 @@ echo
 echo "Chrome version:"
 google-chrome-stable --version
 echo
-echo "Leonardo application launcher:"
-echo "${APP_DIR}/google-chrome.desktop"
+echo "Application launcher:"
+echo "  $APP_LAUNCHER"
 echo
-echo "Leonardo desktop shortcut:"
-echo "${DESKTOP_DIR}/Google Chrome.desktop"
+echo "Desktop shortcut:"
+echo "  $CHROME_SHORTCUT"
 echo
-echo "Chrome launch parameter:"
-echo "--password-store=basic"
+echo "Chrome password store:"
+echo "  basic"
 echo
-echo "System-wide desktop launchers: UNMODIFIED"
+echo "XFCE trust configured:"
+echo "  $SESSION_AVAILABLE"
+echo
+echo "System-wide launchers:"
+echo "  UNMODIFIED"
 echo
 echo "=========================================="
