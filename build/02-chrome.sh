@@ -1,30 +1,26 @@
+# --------------------------------------------------
+# Configure Chrome for automatic-login environments
+# --------------------------------------------------
 
-#!/bin/bash
-#
-# i-fi.tv - Google Chrome installation
-# Debian 13 Trixie
-#
+echo "Configuring Chrome password store..."
 
-set -e
+CHROME_DESKTOP="/usr/share/applications/google-chrome.desktop"
 
-echo "Installing Google Chrome..."
+if [[ -f "$CHROME_DESKTOP" ]]; then
+    # Add basic password store to every Chrome launcher entry.
+    # This prevents Chrome requesting GNOME Keyring unlock.
 
-sudo apt-get update
-sudo apt-get install -y wget ca-certificates
+    sed -i \
+        '/^Exec=/ {
+            /--password-store=basic/! s|^\(Exec=[^ ]*\)|\1 --password-store=basic|
+        }' "$CHROME_DESKTOP"
 
-wget -q -O /tmp/google-chrome.gpg \
-    https://dl.google.com/linux/linux_signing_key.pub
+    echo "Chrome configured to use basic password storage."
+else
+    echo "WARNING: Chrome desktop launcher not found."
+fi
 
-sudo gpg --dearmor --yes \
-    -o /usr/share/keyrings/google-chrome.gpg \
-    /tmp/google-chrome.gpg
-
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
-    | sudo tee /etc/apt/sources.list.d/google-chrome.list
-
-sudo apt-get update
-sudo apt-get install -y google-chrome-stable
-
-echo "Google Chrome installation complete."
-
-google-chrome --version
+# Refresh desktop application database if available
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database /usr/share/applications
+fi
