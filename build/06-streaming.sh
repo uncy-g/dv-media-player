@@ -4,19 +4,19 @@
 # i-fi.tv - Streaming Application Support
 # Debian 13 Trixie
 #
-# Installs the Netflix kiosk launcher.
+# Netflix kiosk launcher installation.
 #
 # Core repository:
 #   build/06-streaming.sh
 #
 # Application repository:
-#   streaming/icons/GL-netflix.png
+#   streaming/icons/GL-netflix.ico
 #   streaming/launchers/GL-netflix.desktop
 #
 # Installed:
 #   /opt/dv/bin/dv-netflix
 #   /usr/local/bin/dv-netflix -> /opt/dv/bin/dv-netflix
-#   /opt/dv/share/icons/GL-netflix.png
+#   /opt/dv/share/icons/GL-netflix.ico
 #   /usr/share/applications/GL-netflix.desktop
 #
 
@@ -33,18 +33,17 @@ echo "======================================"
 BASE="/opt/dv"
 BIN="$BASE/bin"
 SHARE="$BASE/share"
+CONFIG="$BASE/etc/dv-media-player"
 
 PLAYER_REPO="$BASE/bootstrap/dv-media-players"
-
 STREAMING="$PLAYER_REPO/streaming"
 
-ICON_SOURCE="$STREAMING/icons/GL-netflix.png"
+ICON_SOURCE="$STREAMING/icons/GL-netflix.ico"
 DESKTOP_SOURCE="$STREAMING/launchers/GL-netflix.desktop"
 
-ICON_DEST="$SHARE/icons/GL-netflix.png"
+ICON_DEST="$SHARE/icons/GL-netflix.ico"
 DESKTOP_DEST="/usr/share/applications/GL-netflix.desktop"
 
-# Identify desktop user
 TARGET_USER="${SUDO_USER:-leonardo}"
 
 if [[ "$EUID" -ne 0 ]]; then
@@ -58,8 +57,8 @@ if ! id "$TARGET_USER" >/dev/null 2>&1; then
 fi
 
 TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
-TARGET_UID=$(id -u "$TARGET_USER")
 TARGET_GROUP=$(id -gn "$TARGET_USER")
+TARGET_UID=$(id -u "$TARGET_USER")
 
 if [[ -z "$TARGET_HOME" ]]; then
     echo "ERROR: Cannot determine user home."
@@ -67,7 +66,7 @@ if [[ -z "$TARGET_HOME" ]]; then
 fi
 
 # --------------------------------------------------
-# Verify application assets
+# Verify assets
 # --------------------------------------------------
 
 echo
@@ -75,14 +74,14 @@ echo "Checking application assets..."
 
 for FILE in "$ICON_SOURCE" "$DESKTOP_SOURCE"; do
     if [[ ! -f "$FILE" ]]; then
-        echo "ERROR: Required application asset missing:"
+        echo "ERROR: Required asset missing:"
         echo "$FILE"
         exit 1
     fi
 done
 
 # --------------------------------------------------
-# Install dependencies
+# Dependencies
 # --------------------------------------------------
 
 echo
@@ -91,19 +90,14 @@ echo "Installing dependencies..."
 apt-get update
 
 apt-get install -y \
+    curl \
     firefox-esr \
     libglib2.0-bin \
-    desktop-file-utils
-
-# Chrome is installed by 02-chrome.sh.
-if ! command -v google-chrome >/dev/null 2>&1 &&
-   ! command -v google-chrome-stable >/dev/null 2>&1; then
-    echo "WARNING: Google Chrome not detected."
-    echo "Chrome will not be available until installed."
-fi
+    desktop-file-utils \
+    x11-xserver-utils
 
 # --------------------------------------------------
-# Create directories
+# Directories
 # --------------------------------------------------
 
 echo
@@ -111,6 +105,7 @@ echo "Creating directories..."
 
 install -d -m 755 "$BIN"
 install -d -m 755 "$SHARE/icons"
+install -d -m 755 "$CONFIG"
 install -d -m 755 /usr/share/applications
 
 install -d -o "$TARGET_USER" -g "$TARGET_GROUP" \
@@ -120,21 +115,29 @@ install -d -o "$TARGET_USER" -g "$TARGET_GROUP" \
     "$TARGET_HOME/Desktop"
 
 # --------------------------------------------------
-# Install runtime launcher
+# Runtime launcher
 # --------------------------------------------------
 
 echo
-echo "Installing Netflix runtime launcher..."
+echo "Installing Netflix runtime..."
 
 cat > "$BIN/dv-netflix" <<'RUNTIME'
 #!/bin/bash
 #
 # i-fi.tv - Netflix Kiosk Launcher
 #
+# Usage:
+#   dv-netflix
+#   dv-netflix --browser firefox
+#   dv-netflix --screen VGA-1
+#   dv-netflix --browser firefox --screen LVDS-1
+#   dv-netflix --exec kodi
+#
 
-set -u
+set -e
 
 BROWSER="chrome"
+SCREEN=""
 EXEC_COMMAND=""
 
 # --------------------------------------------------
@@ -145,28 +148,40 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
 
         --browser)
-            if [[ -z "${2:-}" ]]; then
+            [[ -n "${2:-}" ]] || {
                 echo "ERROR: --browser requires a value."
                 exit 1
-            fi
-
+            }
             BROWSER="$2"
             shift 2
             ;;
 
+        --screen)
+            [[ -n "${2:-}" ]] || {
+                echo "ERROR: --screen requires an XRandR output name."
+                exit 1
+            }
+            SCREEN="$2"
+            shift 2
+            ;;
+
         --exec)
-            if [[ -z "${2:-}" ]]; then
+            [[ -n "${2:-}" ]] || {
                 echo "ERROR: --exec requires a command."
                 exit 1
-            fi
-
+            }
             EXEC_COMMAND="$2"
             shift 2
             ;;
 
         --help|-h)
             echo "Usage:"
-            echo "  dv-netflix [--browser chrome|firefox] [--exec COMMAND]"
+            echo "  dv-netflix [--browser chrome|firefox]"
+            echo "             [--screen OUTPUT]"
+            echo "             [--exec COMMAND]"
+            echo
+            echo "Available screens:"
+            xrandr --query | grep " connected" || true
             exit 0
             ;;
 
@@ -178,7 +193,56 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --------------------------------------------------
-# Netflix
+# Resolve selected screen geometry
+# --------------------------------------------------
+
+WINDOW_POSITION=""
+WINDOW_SIZE=""
+
+if [[ -n "$SCREEN" ]]; then
+
+    if ! command -v xrandr >/dev/null 2>&1; then
+        echo "ERROR: xrandr is not installed."
+        exit 1
+    fi
+
+    SCREEN_INFO=$(xrandr --query |
+        awk -v screen="$SCREEN" '
+            $1 == screen && $2 == "connected" {
+                for (i=3; i<=NF; i++) {
+                    if ($i ~ /^[0-9]+x[0-9]+\+[0-9]+\+[0-9]+$/) {
+                        print $i
+                        exit
+                    }
+                }
+            }
+        ')
+
+    if [[ -z "$SCREEN_INFO" ]]; then
+        echo "ERROR: Screen '$SCREEN' not found or inactive."
+        exit 1
+    fi
+
+    RESOLUTION="${SCREEN_INFO%%+*}"
+    POSITION="${SCREEN_INFO#*+}"
+
+    WIDTH="${RESOLUTION%x*}"
+    HEIGHT="${RESOLUTION#*x}"
+
+    XPOS="${POSITION%%+*}"
+    YPOS="${POSITION#*+}"
+
+    WINDOW_POSITION="$XPOS,$YPOS"
+    WINDOW_SIZE="$WIDTH,$HEIGHT"
+
+    echo "Selected screen: $SCREEN"
+    echo "Position: $WINDOW_POSITION"
+    echo "Size: $WINDOW_SIZE"
+
+fi
+
+# --------------------------------------------------
+# Netflix profile
 # --------------------------------------------------
 
 URL="https://www.netflix.com/"
@@ -187,12 +251,13 @@ PROFILE="$HOME/.config/dv-netflix"
 
 mkdir -p "$PROFILE"
 
-echo "Starting Netflix..."
-echo "Browser: $BROWSER"
-
 # --------------------------------------------------
 # Launch browser
 # --------------------------------------------------
+
+echo
+echo "Starting Netflix..."
+echo "Browser: $BROWSER"
 
 case "$BROWSER" in
 
@@ -206,12 +271,19 @@ case "$BROWSER" in
             exit 1
         fi
 
-        "$BROWSER_BIN" \
-            --kiosk \
-            --no-first-run \
-            --disable-session-crashed-bubble \
-            --user-data-dir="$PROFILE/chrome" \
-            "$URL" || BROWSER_STATUS=$?
+        CHROME_ARGS=(
+            --kiosk
+            --no-first-run
+            --disable-session-crashed-bubble
+            --user-data-dir="$PROFILE/chrome"
+        )
+
+        if [[ -n "$WINDOW_POSITION" ]]; then
+            CHROME_ARGS+=("--window-position=$WINDOW_POSITION")
+            CHROME_ARGS+=("--window-size=$WINDOW_SIZE")
+        fi
+
+        "$BROWSER_BIN" "${CHROME_ARGS[@]}" "$URL"
 
         ;;
 
@@ -224,17 +296,25 @@ case "$BROWSER" in
             exit 1
         fi
 
-        "$BROWSER_BIN" \
-            --no-remote \
-            --profile "$PROFILE/firefox" \
-            --kiosk \
-            "$URL" || BROWSER_STATUS=$?
+        FIREFOX_ARGS=(
+            --no-remote
+            --profile "$PROFILE/firefox"
+            --kiosk
+        )
+
+        if [[ -n "$WINDOW_POSITION" ]]; then
+            FIREFOX_ARGS+=("--width=$WIDTH")
+            FIREFOX_ARGS+=("--height=$HEIGHT")
+        fi
+
+        "$BROWSER_BIN" "${FIREFOX_ARGS[@]}" "$URL"
 
         ;;
 
     *)
 
         echo "ERROR: Unsupported browser: $BROWSER"
+        echo "Supported: chrome, firefox"
         exit 1
 
         ;;
@@ -242,11 +322,10 @@ case "$BROWSER" in
 esac
 
 # --------------------------------------------------
-# Browser has exited
+# Browser closed
 # --------------------------------------------------
 
-BROWSER_STATUS=${BROWSER_STATUS:-0}
-
+echo
 echo "Netflix browser closed."
 
 # --------------------------------------------------
@@ -254,23 +333,20 @@ echo "Netflix browser closed."
 # --------------------------------------------------
 
 if [[ -n "$EXEC_COMMAND" ]]; then
-
     echo "Executing: $EXEC_COMMAND"
-
     bash -lc "$EXEC_COMMAND"
-
 fi
 
-exit "$BROWSER_STATUS"
+echo "Netflix launcher finished."
 RUNTIME
 
 chmod 755 "$BIN/dv-netflix"
 
-# Create system-wide command symlink
+# System-wide command
 ln -sfn "$BIN/dv-netflix" /usr/local/bin/dv-netflix
 
 # --------------------------------------------------
-# Install application icon
+# Install icon
 # --------------------------------------------------
 
 echo
@@ -279,7 +355,7 @@ echo "Installing Netflix icon..."
 install -m 644 "$ICON_SOURCE" "$ICON_DEST"
 
 # --------------------------------------------------
-# Install application launcher
+# Install desktop application
 # --------------------------------------------------
 
 echo
@@ -287,10 +363,15 @@ echo "Installing desktop application..."
 
 install -m 644 "$DESKTOP_SOURCE" "$DESKTOP_DEST"
 
-# Validate desktop entry
 desktop-file-validate "$DESKTOP_DEST"
 
-# Create user's desktop shortcut
+# --------------------------------------------------
+# Desktop shortcut
+# --------------------------------------------------
+
+echo
+echo "Installing desktop shortcut..."
+
 DESKTOP_SHORTCUT="$TARGET_HOME/Desktop/GL-netflix.desktop"
 
 install -m 755 "$DESKTOP_SOURCE" "$DESKTOP_SHORTCUT"
@@ -298,40 +379,23 @@ install -m 755 "$DESKTOP_SOURCE" "$DESKTOP_SHORTCUT"
 chown "$TARGET_USER:$TARGET_GROUP" "$DESKTOP_SHORTCUT"
 
 # --------------------------------------------------
-# Trust XFCE desktop launcher
+# XFCE trust metadata
 # --------------------------------------------------
 
 echo
-echo "Configuring desktop launcher trust..."
+echo "Configuring XFCE desktop trust..."
 
-gio_cmd=$(command -v gio)
+runuser -u "$TARGET_USER" -- \
+    gio set "$DESKTOP_SHORTCUT" metadata::trusted true
 
-if [[ -n "$gio_cmd" ]]; then
+CHECKSUM=$(sha256sum "$DESKTOP_SHORTCUT" | awk '{print $1}')
 
-    runuser -u "$TARGET_USER" -- env \
-        HOME="$TARGET_HOME" \
-        XDG_RUNTIME_DIR="/run/user/$TARGET_UID" \
-        DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$TARGET_UID/bus}" \
-        "$gio_cmd" set -t string \
-        "$DESKTOP_SHORTCUT" metadata::trusted true
-
-    CHECKSUM=$(sha256sum "$DESKTOP_SHORTCUT" | awk '{print $1}')
-
-    runuser -u "$TARGET_USER" -- env \
-        HOME="$TARGET_HOME" \
-        XDG_RUNTIME_DIR="/run/user/$TARGET_UID" \
-        DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$TARGET_UID/bus}" \
-        "$gio_cmd" set -t string \
-        "$DESKTOP_SHORTCUT" metadata::xfce-exe-checksum "$CHECKSUM"
-
-    touch "$DESKTOP_SHORTCUT"
-
-else
-    echo "WARNING: gio unavailable; desktop trust not configured."
-fi
+runuser -u "$TARGET_USER" -- \
+    gio set -t string "$DESKTOP_SHORTCUT" \
+    metadata::xfce-exe-checksum "$CHECKSUM"
 
 # --------------------------------------------------
-# Update desktop database
+# Desktop database
 # --------------------------------------------------
 
 update-desktop-database /usr/share/applications
@@ -347,15 +411,14 @@ echo "======================================"
 echo
 echo "Runtime:       $BIN/dv-netflix"
 echo "Command:       /usr/local/bin/dv-netflix"
+echo "Configuration: $CONFIG"
 echo "Icon:          $ICON_DEST"
 echo "Application:   $DESKTOP_DEST"
 echo "Shortcut:      $DESKTOP_SHORTCUT"
 echo
-echo "Default browser: Chrome"
-echo "Alternative:     Firefox ESR"
-echo
-echo "Usage:"
+echo "Examples:"
 echo "  dv-netflix"
-echo "  dv-netflix --browser firefox"
+echo "  dv-netflix --screen VGA-1"
+echo "  dv-netflix --browser firefox --screen LVDS-1"
 echo "  dv-netflix --exec kodi"
 echo
