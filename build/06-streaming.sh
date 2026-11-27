@@ -274,6 +274,7 @@ case "$BROWSER" in
             --kiosk
             --no-first-run
             --disable-session-crashed-bubble
+            --password-store=basic
             --user-data-dir="$PROFILE/chrome"
         )
 
