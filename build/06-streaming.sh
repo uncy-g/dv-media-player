@@ -66,7 +66,7 @@ if [[ -z "$TARGET_HOME" ]]; then
 fi
 
 # --------------------------------------------------
-# Verify assets
+# Verify application assets
 # --------------------------------------------------
 
 echo
@@ -246,7 +246,6 @@ fi
 # --------------------------------------------------
 
 URL="https://www.netflix.com/"
-
 PROFILE="$HOME/.config/dv-netflix"
 
 mkdir -p "$PROFILE"
@@ -342,7 +341,10 @@ RUNTIME
 
 chmod 755 "$BIN/dv-netflix"
 
+# --------------------------------------------------
 # System-wide command
+# --------------------------------------------------
+
 ln -sfn "$BIN/dv-netflix" /usr/local/bin/dv-netflix
 
 # --------------------------------------------------
@@ -385,12 +387,20 @@ chown "$TARGET_USER:$TARGET_GROUP" "$DESKTOP_SHORTCUT"
 echo
 echo "Configuring XFCE desktop trust..."
 
-runuser -u "$TARGET_USER" -- \
+DBUS_ADDRESS="unix:path=/run/user/$TARGET_UID/bus"
+
+runuser -u "$TARGET_USER" -- env \
+    HOME="$TARGET_HOME" \
+    XDG_RUNTIME_DIR="/run/user/$TARGET_UID" \
+    DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDRESS" \
     gio set "$DESKTOP_SHORTCUT" metadata::trusted true
 
 CHECKSUM=$(sha256sum "$DESKTOP_SHORTCUT" | awk '{print $1}')
 
-runuser -u "$TARGET_USER" -- \
+runuser -u "$TARGET_USER" -- env \
+    HOME="$TARGET_HOME" \
+    XDG_RUNTIME_DIR="/run/user/$TARGET_UID" \
+    DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDRESS" \
     gio set -t string "$DESKTOP_SHORTCUT" \
     metadata::xfce-exe-checksum "$CHECKSUM"
 
